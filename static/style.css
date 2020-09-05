@@ -1,0 +1,171 @@
+body {
+  margin:0;
+  background-color: #333;
+}
+nav li {
+  display: block;
+  padding: 1em;
+}
+nav > ul > li.current > a:first-child {
+  padding: 1em;
+}
+nav a {
+  color: white;
+  text-decoration: none;
+}
+
+nav li:hover {
+  background: blue;
+}
+nav li.current {
+  background: green;
+}
+nav > ul > li.current > a {
+  background: green;
+}
+
+nav ul {
+  display:grid;
+  grid-template-columns: repeat(3, auto) 1fr;
+  list-style-type: none;
+  margin: 0;
+  padding: 0;
+  background-color: #505050;
+}
+
+nav > ul > li > ul {
+  display: none;
+}
+
+nav > ul > li.current {
+  display: contents;
+}
+nav > ul > li.current > ul {
+  display: flex;
+  background-color: #585858;
+  grid-row-start: 2;
+  grid-column: 1 / span 4;
+  overflow: auto;
+}
+nav > ul > li:hover:not(.current) > ul {
+  display: flex;
+  z-index:1;
+  position: absolute;
+  flex-flow: column;
+  background-color: #585858;
+  top: 6ex;
+
+}
+
+table {
+  padding: 0;
+  background-color: #333;
+  width: 80%;
+  border-spacing: 0;
+}
+th {
+  color: white;
+  padding: 1em;
+  margin: 0;
+}
+td {
+  text-align: center;
+  color: lightgray;
+  padding: 1ex;
+  margin: 0;
+}
+tr:nth-child(even) {
+  background-color: #444;
+}
+.dropped td:nth-child(2) {
+  text-decoration: line-through;
+}
+
+div.round {
+  display: flex;
+  flex-flow: row wrap;
+}
+div.match {
+  display: grid;
+  background-color: #888;
+  border: 2px solid black;
+  margin: 1em;
+  border-radius: 1em;
+  grid-template-columns: repeat(3, auto);
+  grid-template-rows: repeat(2, auto);
+}
+.match.match3 {
+  grid-template-columns: repeat(5, auto);
+}
+.match * {
+  text-align: center;
+}
+.match div {
+  padding: 1em;
+}
+.match > .player {
+    display: contents;
+}
+.match > .player > * {
+  padding: 0.5em 1em;
+}
+.match > .player > *:first-child {
+  padding-top: 1.5em;
+}
+.match > .player:nth-child(1) > .name {
+  grid-row-start: 1;
+  grid-column-start: 1;
+}
+.match > .player:nth-child(3) > .name {
+  grid-row-start: 1;
+  grid-column-start: 3;
+}
+.match.match3 > .player:nth-child(5) > .name {
+  grid-row-start: 1;
+  grid-column-start: 5;
+}
+.match > .player:nth-child(1) > .result {
+  grid-row-start: 2;
+  grid-column-start: 1;
+}
+.match > .player:nth-child(3) > .result {
+  grid-row-start: 2;
+  grid-column-start: 3;
+}
+.match.match3 > .player:nth-child(5) > .result {
+  grid-row-start: 2;
+  grid-column-start: 5;
+}
+.match > .divider {
+  grid-column-start: 2;
+  grid-row: 1 / span 2;
+  padding-left: 1em;
+  padding-right: 1em;
+  border-left: 1px solid black;
+  border-right: 1px solid black;
+  background-color: #666;
+  display: flex;
+  place-items: center;
+}
+.match.match3 > .divider:nth-child(4) {
+  grid-column-start: 4;
+}
+.divider * {
+  text-shadow: 1px 1px #888;
+}
+.player * {
+  text-shadow: 1px 1px black;
+  /* text-shadow: 0px 1px 0 black , 0px -1px 0 black , 1px 0px 0 black , -1px 0px 0 black; */
+}
+.player .name {
+  color: #EEE;
+}
+.player .win {
+  color: gold;
+}
+.player .tie {
+  color: silver;
+}
+.player .loss {
+  color: #9a0000;
+}

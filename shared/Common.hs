@@ -17,12 +17,16 @@ import qualified Data.Map as Map
 import Data.List (sort, sortBy, sortOn)
 import Data.Maybe (fromMaybe)
 import Text.Read (readMaybe)
+import Data.Char (toLower)
 
 
 import Control.Monad
 import Control.Applicative ((<|>))
 import Control.Lens as L
 import Control.Lens.TH
+
+import qualified Data.Aeson as A
+import qualified Data.Aeson.TH as A
 
 import Control.Monad.State
 
@@ -65,35 +69,49 @@ instance FromHttpApiData RoundData where
                         'L' -> Right $ Just (NoPoints, True)
                         _   -> Left "Not a valid RoundData entry"
 
-type ClientRoutes = QueryParams "players" PlayerName :> 
-                    QueryParams "results" RoundData :> 
-                    QueryFlag "no-interact" :>
-                    (MainPage
-                     :<|> RoundPage
-                     :<|> StandingsPage
-                     :<|> PlayerPage
-                     :<|> PlayersPage
-                    )
+type ClientRoutes = MainPage
+                    :<|> RoundPage
+                    :<|> StandingsPage
+                    :<|> PlayerPage
+                    :<|> PlayersPage
+
+type ServersideExtras = GetPlayers
+                      :<|> PutPlayers
+                      :<|> GetResults
+                      :<|> PutResults
+                      :<|> NextRound
 
 type MainPage = View Action
 type RoundPage = "round" :> Capture "round" Int :> View Action
-type StandingsPage = "standings" :> QueryParam "round" Int :> View Action
+type StandingsPage = "standings" :> Capture "round" Int :> View Action
 type PlayerPage = "player" :> Capture "player" PlayerName :> View Action
 type PlayersPage = "players" :> "edit" :> View Action
+
+type GetPlayers = "data" :> "players" :> Get '[JSON] [PlayerName]
+type PutPlayers = "data" :> "players" :> Put '[JSON] [PlayerName]
+type GetResults = "data" :> "results" :> Get '[JSON] [RoundData]
+type PutResults = "data" :> "results" :> Capture "round" Int :> Put '[JSON] [(Int, Maybe (Result, Drop))]
+type NextRound = "data" :> "results" :> "nextRound" :> PostNoContent '[] ()
 
 data Action = NoOp
             | ChangeURI URI
             | HandleURI URI
             | PlayerEntryAction PlayerEntryAction
             | ChangeResult Int [(Int, Maybe Result)]
+            | AddRound
             deriving (Eq, Ord, Show)
 
 data PlayerEntryAction = ChangePlayerInputField String | ApplyPlayerInput
             deriving (Eq, Ord, Show)
 
+data PageData = PageData {
+                _pagePlayers :: [PlayerName]
+              , _pageResults :: [RoundData]
+              }
+              deriving (Eq, Ord, Show)
+
 data Page = Page {
-              _pagePlayers :: [PlayerName]
-            , _pageResults :: [RoundData]
+              _pageData :: PageData
             , _pageInteractive :: Bool
             , _pageNav :: PageNav
             }
@@ -106,55 +124,60 @@ data PageNav = PageRound Int
             deriving (Eq, Ord, Show)
 
 $(makeLenses ''Page)
+$(makeLenses ''PageData)
 $(makePrisms ''PageNav)
 $(makeLenses ''RoundData)
 $(makePrisms ''Action)
 $(makePrisms ''PlayerEntryAction)
+$(A.deriveJSON A.defaultOptions{ A.sumEncoding = A.UntaggedValue, A.constructorTagModifier = map toLower } ''Result)
+$(A.deriveJSON A.defaultOptions{ A.fieldLabelModifier = A.camelTo2 '_' . drop 1 } ''RoundData)
+$(A.deriveJSON A.defaultOptions{ A.fieldLabelModifier = A.camelTo2 '_' . drop 1 } ''PageData)
 
 -- clientPages [] _ = (PagePlayerInput $ PagePlayerInputData "" Nothing)
 --                    :<|> (\r -> PagePlayerInput $ PagePlayerInputData "" $ Just $ PageRound r)
 --                    :<|> (\r -> PagePlayerInput $ PagePlayerInputData "" $ Just $ PageStandings r)
 --                    :<|> (\p -> PagePlayerInput $ PagePlayerInputData "" $ Just $ PagePlayer p)
 --                    :<|> (PagePlayerInput $ PagePlayerInputData "" Nothing)
-clientPages players results (not -> interactive) = ("./", Page players results interactive $ PageStandings Nothing)
-                                                 :<|> (\r -> ("../../", Page players results interactive $ PageRound r))
-                                                 :<|> (\r -> ("../", Page players results interactive $ PageStandings r))
-                                                 :<|> (\p -> ("../../", Page players results interactive $ PagePlayer p))
-                                                 :<|> ("../../", Page players results interactive $ PagePlayerInput (unlines players) Nothing)
+clientPages = ("./", PageStandings Nothing)
+            :<|> (\r -> ("../../", PageRound r))
+            :<|> (\r -> ("../../", PageStandings (Just r)))
+            :<|> (\p -> ("../../", PagePlayer p))
+            :<|> ("../../", PagePlayerInput [] Nothing)
 
 instance HasLink Page where
     type MkLink Page a = a
     toLink toA _ = toA
 
-goMainPage :: [PlayerName] -> [RoundData] -> Bool -> URI
-goMainPage players results interactive = let (r :<|> _ :<|> _ :<|> _ :<|> _) = allLinks (Proxy @ ClientRoutes) players results (not interactive) in linkURI' LinkArrayElementPlain r
-goRoundPage :: [PlayerName] -> [RoundData] -> Bool -> Int -> URI
-goRoundPage players results interactive round = let (_ :<|> r :<|> _ :<|> _ :<|> _) = allLinks (Proxy @ ClientRoutes) players results (not interactive) in linkURI' LinkArrayElementPlain $ r round
-goStandingsPage :: [PlayerName] -> [RoundData] -> Bool -> Maybe Int -> URI
-goStandingsPage players results interactive round = let (_ :<|> _ :<|> r :<|> _ :<|> _) = allLinks (Proxy @ ClientRoutes) players results (not interactive) in linkURI' LinkArrayElementPlain $ r round
-goPlayerPage :: [PlayerName] -> [RoundData] -> Bool -> PlayerName -> URI
-goPlayerPage players results interactive player = let (_ :<|> _ :<|> _ :<|> r :<|> _) = allLinks (Proxy @ ClientRoutes) players results (not interactive) in linkURI' LinkArrayElementPlain $ r player
-goPlayersPage :: [PlayerName] -> [RoundData] -> Bool -> URI
-goPlayersPage players results interactive = let (_ :<|> _ :<|> _ :<|> _ :<|> r) = allLinks (Proxy @ ClientRoutes) players results (not interactive) in linkURI' LinkArrayElementPlain r
+-- linkMainPage :<|> linkRoundPage :<|> linkStandingsPage :<|> linkPlayerPage :<|> linkPlayersPage = allLinks (Proxy @ ClientRoutes)
+-- goMainPage = linkURI linkMainPage
+(linkURI -> goMainPage) :<|> (fmap linkURI -> goRoundPage) :<|> (fmap linkURI -> goStandingsPage) :<|> (fmap linkURI -> goPlayerPage) :<|> (linkURI -> goPlayersPage) = allLinks (Proxy @ ClientRoutes)
+-- goMainPage :: [PlayerName] -> [RoundData] -> Bool -> URI
+-- goMainPage players results interactive = let (r :<|> _ :<|> _ :<|> _ :<|> _) = allLinks (Proxy @ ClientRoutes) players results (not interactive) in linkURI' LinkArrayElementPlain r
+-- goRoundPage :: [PlayerName] -> [RoundData] -> Bool -> Int -> URI
+-- goRoundPage players results interactive round = let (_ :<|> r :<|> _ :<|> _ :<|> _) = allLinks (Proxy @ ClientRoutes) players results (not interactive) in linkURI' LinkArrayElementPlain $ r round
+-- goStandingsPage :: [PlayerName] -> [RoundData] -> Bool -> Maybe Int -> URI
+-- goStandingsPage players results interactive round = let (_ :<|> _ :<|> r :<|> _ :<|> _) = allLinks (Proxy @ ClientRoutes) players results (not interactive) in linkURI' LinkArrayElementPlain $ r round
+-- goPlayerPage :: [PlayerName] -> [RoundData] -> Bool -> PlayerName -> URI
+-- goPlayerPage players results interactive player = let (_ :<|> _ :<|> _ :<|> r :<|> _) = allLinks (Proxy @ ClientRoutes) players results (not interactive) in linkURI' LinkArrayElementPlain $ r player
+-- goPlayersPage :: [PlayerName] -> [RoundData] -> Bool -> URI
+-- goPlayersPage players results interactive = let (_ :<|> _ :<|> _ :<|> _ :<|> r) = allLinks (Proxy @ ClientRoutes) players results (not interactive) in linkURI' LinkArrayElementPlain r
 
-goPage :: Page -> URI
-goPage (Page players results interactive nav) = case nav of
-        PageRound r -> goRoundPage players results interactive r
-        PageStandings Nothing -> goMainPage players results interactive
-        PageStandings r -> goStandingsPage players results interactive r
-        PagePlayer p -> goPlayerPage players results interactive p
-        PagePlayerInput _ _ -> goPlayersPage players results interactive
+goPage :: PageNav -> URI
+goPage (PageRound r) = goRoundPage r
+goPage (PageStandings Nothing) = goMainPage
+goPage (PageStandings (Just r)) = goStandingsPage r
+goPage (PagePlayer p) = goPlayerPage p
+goPage (PagePlayerInput _ _) = goPlayersPage
 
-hrefPage :: RootLink -> Page -> [Attribute Action]
+hrefPage :: RootLink -> PageNav -> [Attribute Action]
 hrefPage root p = [hrefURI root (goPage p), onWithOptions (Options True False) "click" emptyDecoder (\() -> ChangeURI $ goPage p)]
 
 type RootLink = MisoString
 hrefURI :: RootLink -> URI -> Attribute action
 hrefURI root = href_ . (root <>) . toMisoString . show
 
-
 viewPage :: RootLink -> Page -> View Action
-viewPage root page@(Page players results interactive nav) = div_ [] ([
+viewPage root page@(Page pData@(PageData players results) interactive nav) = div_ [] ([
                   header
                 ] <> content
                 ) where
@@ -162,13 +185,13 @@ viewPage root page@(Page players results interactive nav) = div_ [] ([
                           nav_ [] [
                               ul_ []
                                 [ li_ ((if has _PageStandings nav then (class_ "current" :) else id ) []) [
-                                      a_ (hrefPage root $ Page players results interactive (PageStandings Nothing)) [text "Standings"]
+                                      a_ (hrefPage root $ PageStandings Nothing) [text "Standings"]
                                     ]
                                 , li_ ((if has _PageRound nav then (class_ "current" :) else id ) []) [
-                                      a_ (hrefPage root $ Page players results interactive $ PageRound 0) [text "Rounds"]
+                                      a_ (hrefPage root $ PageRound 0) [text "Rounds"]
                                     , ul_ [] $ flip fmap [1..length results] $ \r ->
                                         li_ ((if (\r' -> r' == Just r || (r' == Just 0 && r == length results)) (nav ^? _PageRound) then (class_ "current" :) else id) []) [
-                                              a_ (hrefPage root $ Page players results interactive $ PageRound r) [text $ toMisoString $ "Round " <> show r]
+                                              a_ (hrefPage root $ PageRound r) [text $ toMisoString $ "Round " <> show r]
                                             ]
                                     ]
                                 -- , li_ ((if has _PagePlayer nav || has _PagePlayerInput nav then (class_ "current" :) else id ) []) [
@@ -181,10 +204,11 @@ viewPage root page@(Page players results interactive nav) = div_ [] ([
                                 ]
                             ]
                         ]
-                    content = case nav of
+                    content = (if interactive then (nodeHtml "data" [id_ "page-data", data_ "page-data" (toMisoString $ A.encode pData)] [] :) else id) $ (case nav of
                         PageStandings r -> [standings r]
                         PageRound r -> round r
                         _ -> [span_ [] [text "TODO"]]
+                        )
                     standings Nothing = standings (Just $ length results)
                     standings (Just r) = table_ [] $ (
                         tr_ [] ([
@@ -205,7 +229,7 @@ viewPage root page@(Page players results interactive nav) = div_ [] ([
                     nextRoundPromt = span_ [class_ "next-round-prompt"] [
                                       text "All results were entered."
                                     , br_ []
-                                    , a_ (hrefPage root $ Page players (results <> [RoundData (replicate (length players) Nothing)]) interactive $ PageRound 0) [
+                                    , a_ [href_ "#", onClick AddRound] [
                                           text "Compute next round's pairings."
                                         ]
                                     ]
@@ -389,11 +413,11 @@ listStandings players rounds = fmap (\(rank, ((player, i), (points, oppTotal, _,
                                                              | otherwise = rankHelper (r, succ n) x' xs ((r,snd x):rs)
                             perRoundResults i rounds = rounds ^.. traverse . roundData . ix i . _Just . _1 . to resultPoints
 
-switchPage :: (RootLink, Page) -> (RootLink, Page) -> (RootLink, Page)
-switchPage = const --maybe keep some data?
+switchPage :: (RootLink, PageNav) -> (RootLink, Page) -> (RootLink, Page)
+switchPage (l, n) (_, (Page d i _)) = (l, Page d i n)
 
-getPage :: URI -> Maybe (RootLink, Page)
-getPage u = case route (Proxy @ ClientRoutes) clientPages u of
+getPageNav :: URI -> Maybe (RootLink, PageNav)
+getPageNav u = case route (Proxy @ ClientRoutes) clientPages u of
             Right page -> Just page
             Left _ -> Nothing
 

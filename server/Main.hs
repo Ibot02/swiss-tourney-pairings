@@ -15,7 +15,7 @@ import Common
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Char (toLower)
-import Data.Maybe (fromJust)
+import Data.Maybe (fromJust, fromMaybe)
 import Data.Proxy
 import GHC.Generics
 import Data.Aeson
@@ -36,6 +36,9 @@ import Control.Monad (when)
 
 import Miso
 
+addResult (PageData players []) = PageData players $ [RoundData $ replicate (length players) Nothing]
+addResult d = d
+
 main = do
     p' <- Env.lookupEnv "PORT"
     path <- Env.getExecutablePath
@@ -43,12 +46,15 @@ main = do
             Nothing -> 3002
             Just p -> p
         staticPath = fst (splitFileName path) ++ "/../static"
+        dataPath = "./data/"
     IO.hPutStrLn IO.stderr $ "Starting Server on port " ++ show p
     IO.hPutStrLn IO.stderr $ "Serving static files from " ++ staticPath
-    run p $ serve (Proxy @ API) (static staticPath :<|> serverHandlers :<|> pure manifest :<|> Tagged handle404) where
+    IO.hPutStrLn IO.stderr $ "Looking for data in " ++ dataPath
+    (maybe (PageData [] []) addResult -> (PageData players results)) <- decodeFileStrict $ dataPath <> "pageData.json"
+    run p $ serve (Proxy @ API) (static staticPath :<|> serverHandlers players results :<|> pure manifest :<|> Tagged handle404) where
         static path = serveDirectoryWith (defaultWebAppSettings path)
 
-type ServerRoutes = ToServerRoutes ClientRoutes Wrapper Action
+type ServerRoutes = QueryFlag "interactive" :> ToServerRoutes ClientRoutes Wrapper Action
 
 type API = ("static" :> Raw)
         :<|> ServerRoutes
@@ -126,13 +132,13 @@ handle404 _ respond = respond $ responseLBS
     [("Content-Type", "text/html")] $
         renderBS $ toHtml $ Wrapper ("/", True, the404)
 
-serverHandlers :: Server ServerRoutes
-serverHandlers players results (not -> interactive) = mainPage :<|> roundPage :<|> standingsPage :<|> playerPage :<|> playersPage where
-    mainPage = send "./" interactive $ Page players results interactive $ PageStandings Nothing
-    roundPage r = send "../../" interactive $ Page players results interactive $ PageRound r
-    standingsPage r = send "../" interactive $ Page players results interactive $ PageStandings r
-    playerPage r = send "../../" interactive $ Page players results interactive $ PagePlayer r
-    playersPage = send "../../" interactive $ Page players results interactive $ PagePlayerInput (unlines players) Nothing
+serverHandlers :: [PlayerName] -> [RoundData] -> Server ServerRoutes
+serverHandlers players results interactive = mainPage :<|> roundPage :<|> standingsPage :<|> playerPage :<|> playersPage where
+    mainPage = send "./" interactive $ Page (PageData players results) interactive $ PageStandings Nothing
+    roundPage r = send "../../" interactive $ Page (PageData players results) interactive $ PageRound r
+    standingsPage r = send "../" interactive $ Page (PageData players results) interactive $ PageStandings $ Just r
+    playerPage r = send "../../" interactive $ Page (PageData players results) interactive $ PagePlayer r
+    playersPage = send "../../" interactive $ Page (PageData players results) interactive $ PagePlayerInput (unlines players) Nothing
     send root interactive p = pure $ Wrapper (root, interactive, viewPage root p)
 
 $(deriveJSON Data.Aeson.TH.defaultOptions{fieldLabelModifier = (camelTo2 '_' . drop (length ("manifestIcon" :: String)))} ''ManifestIcon)

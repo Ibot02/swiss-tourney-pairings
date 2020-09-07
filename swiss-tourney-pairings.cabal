@@ -54,9 +54,11 @@ executable client
                        , miso
                        , servant
                        , containers
+                       , aeson
                        , lens
                        , text
                        , mtl
+                       , jsaddle
     hs-source-dirs:      shared
                        , client
     default-language:    Haskell2010

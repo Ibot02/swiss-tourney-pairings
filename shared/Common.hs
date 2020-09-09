@@ -14,7 +14,7 @@ import Data.Proxy
 
 import Data.Map (Map())
 import qualified Data.Map as Map
-import Data.List (sort, sortBy, sortOn)
+import Data.List (sort, sortBy, sortOn, findIndex)
 import Data.Maybe (fromMaybe)
 import Text.Read (readMaybe)
 import Data.Char (toLower)
@@ -29,6 +29,7 @@ import qualified Data.Aeson as A
 import qualified Data.Aeson.TH as A
 
 import Control.Monad.State
+import Control.Monad.Writer
 
 import Miso
 import Miso.String (MisoString(..), toMisoString, fromMisoString)
@@ -88,10 +89,10 @@ type PlayerPage = "player" :> Capture "player" PlayerName :> View Action
 type PlayersPage = "players" :> "edit" :> View Action
 
 type GetPlayers = "data" :> "players" :> Get '[JSON] [PlayerName]
-type PutPlayers = "data" :> "players" :> Put '[JSON] [PlayerName]
+type PutPlayers = "data" :> "players" :> ReqBody '[JSON] [PlayerName] :> PutNoContent '[JSON] ()
 type GetResults = "data" :> "results" :> Get '[JSON] [RoundData]
-type PutResults = "data" :> "results" :> Capture "round" Int :> Put '[JSON] [(Int, Maybe (Result, Drop))]
-type NextRound = "data" :> "results" :> "nextRound" :> PostNoContent '[] ()
+type PutResults = "data" :> "results" :> Capture "round" Int :> ReqBody '[JSON] [(Int, Maybe (Result, Drop))] :> Put '[JSON] [RoundData]
+type NextRound = "data" :> "results" :> "nextRound" :> PostNoContent '[JSON] ()
 
 data Action = NoOp
             | ChangeURI URI
@@ -194,19 +195,20 @@ viewPage root page@(Page pData@(PageData players results) interactive nav) = div
                                               a_ (hrefPage root $ PageRound r) [text $ toMisoString $ "Round " <> show r]
                                             ]
                                     ]
-                                -- , li_ ((if has _PagePlayer nav || has _PagePlayerInput nav then (class_ "current" :) else id ) []) [
-                                --       a_ (hrefPage root $ Page players results interactive $ PagePlayerInput (unlines players) (Just nav)) [text "Players"]
-                                --     , ul_ [] $ flip fmap players $ \p ->
-                                --         li_ ((if (nav ^? _PagePlayer) == Just p then (class_ "current" :) else id) []) [
-                                --               a_ (hrefPage root $ Page players results interactive $ PagePlayer p) [text $ toMisoString p]
-                                --             ]
-                                --     ]
+                                , li_ ((if has _PagePlayer nav || has _PagePlayerInput nav then (class_ "current" :) else id ) []) [
+                                      a_ {- (hrefPage root $ Page players results interactive $ PagePlayerInput (unlines players) (Just nav)) -}[] [text "Players"]
+                                    , ul_ [] $ flip fmap players $ \p ->
+                                        li_ ((if (nav ^? _PagePlayer) == Just p then (class_ "current" :) else id) []) [
+                                              a_ (hrefPage root $ PagePlayer p) [text $ toMisoString p]
+                                            ]
+                                    ]
                                 ]
                             ]
                         ]
                     content = (if interactive then (nodeHtml "data" [id_ "page-data", data_ "page-data" (toMisoString $ A.encode pData)] [] :) else id) $ (case nav of
                         PageStandings r -> [standings r]
                         PageRound r -> round r
+                        PagePlayer p -> [playerPage p]
                         _ -> [span_ [] [text "TODO"]]
                         )
                     standings Nothing = standings (Just $ length results)
@@ -220,7 +222,7 @@ viewPage root page@(Page pData@(PageData players results) interactive nav) = div
                         ) $ withFoldable (listStandings players (take r results)) $ \(pos, name, points, oppAvg, dropped, perRound) ->
                             tr_ (if dropped then [class_ "dropped"] else []) ([
                                   td_ [] [text $ toMisoString $ show pos]
-                                , td_ [] [text $ toMisoString name]
+                                , td_ [] [playerName name]--[text $ toMisoString name]
                                 , td_ [] [text $ toMisoString $ show points]
                                 , td_ [] [text $ toMisoString $ take 5 $ show oppAvg]
                                 ] <> withFoldable (take r $ fmap show perRound <> repeat "-") (\r ->
@@ -249,7 +251,7 @@ viewPage root page@(Page pData@(PageData players results) interactive nav) = div
                         pb = players !! b
                         in div_ [class_ "match"] [
                               div_ [class_ "player"] [
-                                  span_ [class_ "name"] [text $ toMisoString pa]
+                                  span_ [class_ "name"] [playerName pa]--[text $ toMisoString pa]
                                 , case ra of
                                     Nothing -> span_ [class_ "result tbd"] []
                                     Just NoPoints -> span_ [class_ "result loss"] [text "+0"]
@@ -261,7 +263,7 @@ viewPage root page@(Page pData@(PageData players results) interactive nav) = div
                                     , span_ [] (if interactive then [dropdown [] [("", Nothing), ("3-0", Just (ThreePoints, NoPoints)), ("0-3", Just (NoPoints, ThreePoints)), ("1-1", Just (OnePoint, OnePoint)), ("0-0", Just (NoPoints, NoPoints))] ((,) <$> ra <*> rb) (\se -> ChangeResult (r - 1) [(a, se ^? _Just . _1), (b, se ^? _Just . _2)])] else [])
                                 ]
                             , div_ [class_ "player"] [
-                                  span_ [class_ "name"] [text $ toMisoString pb]
+                                  span_ [class_ "name"] [playerName pb]--[text $ toMisoString pb]
                                 , case rb of
                                     Nothing -> span_ [class_ "result tbd"] []
                                     Just NoPoints -> span_ [class_ "result loss"] [text "+0"]
@@ -278,7 +280,7 @@ viewPage root page@(Page pData@(PageData players results) interactive nav) = div
                         pc = players !! c
                         in div_ [class_ "match match3"] [
                               div_ [class_ "player"] [
-                                  span_ [class_ "name"] [text $ toMisoString pa]
+                                  span_ [class_ "name"] [playerName pa]--[text $ toMisoString pa]
                                 , case ra of
                                     Nothing -> span_ [class_ "result tbd"] []
                                     Just NoPoints -> span_ [class_ "result loss"] [text "+0"]
@@ -306,7 +308,7 @@ viewPage root page@(Page pData@(PageData players results) interactive nav) = div
                                         ] ((,,) <$> ra <*> rb <*> rc) (\se -> ChangeResult (r - 1) [(a, se ^? _Just . _1), (b, se ^? _Just . _2), (c, se ^? _Just . _3)])] else [])
                                 ]
                             , div_ [class_ "player"] [
-                                  span_ [class_ "name"] [text $ toMisoString pb]
+                                  span_ [class_ "name"] [playerName pb]--[text $ toMisoString pb]
                                 , case rb of
                                     Nothing -> span_ [class_ "result tbd"] []
                                     Just NoPoints -> span_ [class_ "result loss"] [text "+0"]
@@ -317,7 +319,7 @@ viewPage root page@(Page pData@(PageData players results) interactive nav) = div
                                       span_ [] [text "vs"]
                                     ]
                             , div_ [class_ "player"] [
-                                  span_ [class_ "name"] [text $ toMisoString pc]
+                                  span_ [class_ "name"] [playerName pc]--[text $ toMisoString pc]
                                 , case rc of
                                     Nothing -> span_ [class_ "result tbd"] []
                                     Just NoPoints -> span_ [class_ "result loss"] [text "+0"]
@@ -325,6 +327,24 @@ viewPage root page@(Page pData@(PageData players results) interactive nav) = div
                                     Just ThreePoints -> span_ [class_ "result win"] [text "+3"]
                                 ]
                             ]
+                    playerName player = a_ (hrefPage root (PagePlayer player)) [text $ toMisoString player]
+                    playerPage player = case findIndex (==player) players of
+                        Nothing -> div_ [] [text "Not found: That player does not seem to exist"]
+                        Just i -> div_ [class_ "player-matches"] $ execWriter $ do
+                            (\f -> fix f [(0,0,[],False,False) | _ <- players] results) $ \f standings r -> case r of
+                                [] -> return ()
+                                (rd@(RoundData round):rounds) -> do
+                                    let pairings@(threeMatch, twoMatches) = makePairings standings
+                                        standings' = applyResults pairings rd standings
+                                    forM_ threeMatch $ \(a,b,c) ->
+                                        if i `elem` [a,b,c]
+                                        then tell $ (:[]) $ match3 a b c (length results - length rounds) round
+                                        else return ()
+                                    forM_ twoMatches $ \(a,b) ->
+                                        if i `elem` [a,b]
+                                        then tell $ (:[]) $ match a b (length results - length rounds) round
+                                        else return ()
+                                    f standings' rounds
 
 dropdown :: (Eq a, Show a, Read a) => [Attribute Action] -> [(MisoString, a)] -> a -> (a -> Action) -> View Action
 dropdown attrs options selected action = select_ ((onChange (\s -> fromMaybe NoOp $ action <$> readMaybe (fromMisoString s))) : attrs) $ withFoldable options $ \(t,v) ->

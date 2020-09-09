@@ -9,9 +9,12 @@ nav li {
 nav > ul > li.current > a:first-child {
   padding: 1em;
 }
+a {
+  color: inherit;
+  text-decoration: none;
+}
 nav a {
   color: white;
-  text-decoration: none;
 }
 
 nav li:hover {
@@ -84,6 +87,11 @@ tr:nth-child(even) {
 div.round {
   display: flex;
   flex-flow: row wrap;
+}
+div.player-matches {
+  display: flex;
+  flex-flow: column;
+  align-items: flex-start;
 }
 div.match {
   display: grid;

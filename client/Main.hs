@@ -10,7 +10,7 @@ import Common
 import Data.Proxy
 
 import Data.List.NonEmpty (NonEmpty(..))
-import Data.Maybe (maybe, fromMaybe)
+import Data.Maybe (maybe, fromMaybe, catMaybes)
 
 import Miso hiding (at)
 import Miso.String (fromMisoString, toMisoString, MisoString())
@@ -21,6 +21,9 @@ import Control.Lens
 import Control.Monad.Writer (tell)
 
 import Language.Javascript.JSaddle as J
+
+import Servant.API
+import Servant.Client.Ghcjs
 
 import Data.Aeson (decode)
 
@@ -38,6 +41,8 @@ main = do
         , subs = [uriSub HandleURI]
         , logLevel = Off}
 
+getPlayers :<|> putPlayers :<|> getResults :<|> putResults :<|> nextRound = client (Proxy @ ServersideExtras)
+
 getPageWithData :: (Maybe PageData) -> URI -> Maybe (RootLink, Page)
 getPageWithData pData' uri = do
                 pData <- pData'
@@ -52,19 +57,29 @@ updatePage (HandleURI u) = case route (Proxy :: Proxy ClientRoutes) clientPages 
                                 Left _ -> pure ()
                                 Right (p@(r,p')) -> id %= Just . maybe (r, Page (PageData [] []) True p') (switchPage p)
 updatePage (PlayerEntryAction (ChangePlayerInputField s)) = _Just . _2 . pageNav . _PagePlayerInput . _1 .= s
-updatePage (PlayerEntryAction ApplyPlayerInput) = do
-                    p <- preuse $ _Just . _2 . pageNav . _PagePlayerInput
+updatePage (PlayerEntryAction ApplyPlayerInput) = zoom (_Just . _2) $ do
+                    p <- preuse (pageNav . _PagePlayerInput)
                     case p of
-                        Nothing -> pure ()
+                        Nothing -> return ()
                         Just ((filter (/= "") . lines -> players), (fromMaybe (PageStandings Nothing) -> nextPage)) -> do
-                            _Just . _2 . pageData . pagePlayers .= players
+                            pageData . pagePlayers .= players
                             scheduleIO $ return $ ChangeURI $ goPage nextPage
-updatePage (ChangeResult round changes) =
+                            scheduleIO $ do
+                                runClientM $ putPlayers players
+                                return NoOp
+updatePage (ChangeResult round changes) = zoom (_Just . _2 . pageData . pageResults . ix round . roundData) $ do
                     forM_ changes $ \(p, r) ->
-                        _Just . _2 . pageData . pageResults . ix round . roundData . ix p %= (case r of
-                                (Just r) -> Just . maybe (r, False) (_1 .~ r)
-                                Nothing -> const Nothing
+                        ix p %= (case r of
+                            (Just r) -> Just . maybe (r, False) (_1 .~ r)
+                            Nothing -> const Nothing
                             )
-updatePage AddRound = _Just . _2 . pageData %= (\(PageData players results) -> PageData players $ results <> [RoundData $ replicate (length players) Nothing])
+                    (changes' :: [(Int, Maybe (Result, Drop))]) <- fmap catMaybes $ forM changes $ \(p, _) -> fmap ((,) p) <$> preuse (ix p)
+                    scheduleIO $ do
+                        runClientM $ putResults round changes'
+                        return NoOp
+updatePage AddRound = do
+        _Just . _2 . pageData %= (\(PageData players results) -> PageData players $ results <> [RoundData $ replicate (length players) Nothing])
+        scheduleIO $ do
+            runClientM nextRound
+            return NoOp
 --     updatePage (PlayerDrop player) =
---     updatePage FinalizeRound =

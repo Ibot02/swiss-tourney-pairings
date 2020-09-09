@@ -32,7 +32,11 @@ import qualified System.Environment as Env
 import Text.Read (readMaybe)
 import System.FilePath
 
-import Control.Monad (when)
+import Control.Monad (when, forM_)
+import Control.Concurrent.STM.TVar
+import Control.Lens
+import Control.Monad.IO.Class (liftIO)
+import GHC.Conc
 
 import Miso
 
@@ -51,13 +55,18 @@ main = do
     IO.hPutStrLn IO.stderr $ "Serving static files from " ++ staticPath
     IO.hPutStrLn IO.stderr $ "Looking for data in " ++ dataPath
     (maybe (PageData [] []) addResult -> (PageData players results)) <- decodeFileStrict $ dataPath <> "pageData.json"
-    run p $ serve (Proxy @ API) (static staticPath :<|> serverHandlers players results :<|> pure manifest :<|> Tagged handle404) where
+    (playersV, resultsV) <- atomically $ do
+        p <- newTVar players
+        r <- newTVar results
+        return (p,r)
+    run p $ serve (Proxy @ API) (static staticPath :<|> serverHandlers playersV resultsV :<|> dataHandlers playersV resultsV :<|> pure manifest :<|> Tagged handle404) where
         static path = serveDirectoryWith (defaultWebAppSettings path)
 
 type ServerRoutes = QueryFlag "interactive" :> ToServerRoutes ClientRoutes Wrapper Action
 
 type API = ("static" :> Raw)
         :<|> ServerRoutes
+        :<|> ServersideExtras
         :<|> ("manifest.json" :> Get '[JSON] Manifest)
         :<|> Raw
 
@@ -132,14 +141,42 @@ handle404 _ respond = respond $ responseLBS
     [("Content-Type", "text/html")] $
         renderBS $ toHtml $ Wrapper ("/", True, the404)
 
-serverHandlers :: [PlayerName] -> [RoundData] -> Server ServerRoutes
-serverHandlers players results interactive = mainPage :<|> roundPage :<|> standingsPage :<|> playerPage :<|> playersPage where
-    mainPage = send "./" interactive $ Page (PageData players results) interactive $ PageStandings Nothing
-    roundPage r = send "../../" interactive $ Page (PageData players results) interactive $ PageRound r
-    standingsPage r = send "../" interactive $ Page (PageData players results) interactive $ PageStandings $ Just r
-    playerPage r = send "../../" interactive $ Page (PageData players results) interactive $ PagePlayer r
-    playersPage = send "../../" interactive $ Page (PageData players results) interactive $ PagePlayerInput (unlines players) Nothing
-    send root interactive p = pure $ Wrapper (root, interactive, viewPage root p)
+serverHandlers :: TVar [PlayerName] -> TVar [RoundData] -> Server ServerRoutes
+serverHandlers playersV resultsV interactive = mainPage :<|> roundPage :<|> standingsPage :<|> playerPage :<|> playersPage where
+    mainPage = send "./" interactive $ PageStandings Nothing
+    roundPage r = send "../../" interactive $ PageRound r
+    standingsPage r = send "../" interactive $ PageStandings $ Just r
+    playerPage r = send "../../" interactive $ PagePlayer r
+    playersPage = send' "../../" interactive $ \players -> PagePlayerInput (unlines players) Nothing
+    send root interactive p = send' root interactive (const p)
+    send' root interactive p = liftIO $ do
+        (players, results) <- atomically $ do
+            p <- readTVar playersV
+            r <- readTVar resultsV
+            return (p,r)
+        pure $ Wrapper (root, interactive, viewPage root (Page (PageData players results) interactive (p players)))
+
+dataHandlers :: TVar [PlayerName] -> TVar [RoundData] -> Server ServersideExtras
+dataHandlers playersV resultsV = getPlayers :<|> putPlayers :<|> getResults :<|> putResults :<|> postNextRound where
+    getPlayers = liftIO $ atomically $ readTVar playersV
+    putPlayers players = liftIO $ do
+        atomically $ do
+            oldPlayers <- readTVar playersV
+            if length oldPlayers == length players then
+                writeTVar playersV players
+            else do
+                writeTVar playersV players
+                writeTVar resultsV [RoundData $ replicate (length players) Nothing]
+        return ()
+    getResults = liftIO $ atomically $ readTVar resultsV
+    putResults round results = liftIO $ atomically $ do
+                forM_ results $ \(p, r) ->
+                    modifyTVar resultsV $ ix round . roundData . ix p .~ r
+                readTVar resultsV
+    postNextRound = liftIO $ atomically $ do
+            p <- length <$> readTVar playersV
+            modifyTVar resultsV $ (<> [RoundData $ replicate p Nothing])
+        
 
 $(deriveJSON Data.Aeson.TH.defaultOptions{fieldLabelModifier = (camelTo2 '_' . drop (length ("manifestIcon" :: String)))} ''ManifestIcon)
 $(deriveJSON Data.Aeson.TH.defaultOptions{fieldLabelModifier = (camelTo2 '_' . drop (length ("manifest" :: String)))} ''Manifest)

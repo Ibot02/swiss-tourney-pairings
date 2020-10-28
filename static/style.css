@@ -177,3 +177,39 @@ div.match {
 .player .loss {
   color: #9a0000;
 }
+.top4 {
+  display: grid;
+  grid-template-rows: [finalsStart] 2fr [semiOneStart semiTwoStart] 1fr [finalsEnd matchForThirdStart] 2fr [semiOneEnd semiTwoEnd] 1fr [matchForThirdEnd];
+  grid-template-columns: 1fr [semiOneStart] auto [semiOneEnd] 1fr [finalsStart matchForThirdStart] auto [finalsEnd matchForThirdEnd] 1fr [semiTwoStart] auto [semiTwoEnd] 2fr;
+  align-items: center;
+  justify-items: center;
+}
+.top4 > div {
+  display: flex;
+  flex-flow: column;
+}
+.top4 .match {
+  grid-template-columns: 1fr auto 1fr;
+}
+.top4 .semifinals-one {
+  grid-row: semiOneStart / semiOneEnd;
+  grid-column: semiOneStart / semiOneEnd;
+}
+.top4 .semifinals-two {
+  grid-row: semiTwoStart / semiTwoEnd;
+  grid-column: semiTwoStart / semiTwoEnd;
+}
+.top4 .match-for-third {
+  grid-row: matchForThirdStart / matchForThirdEnd;
+  grid-column: matchForThirdStart / matchForThirdEnd;
+}
+.top4 .finals {
+  grid-row: finalsStart / finalsEnd;
+  grid-column: finalsStart / finalsEnd;
+  font-size: larger;
+}
+.top4 .match-heading {
+  color: white;
+  text-shadow: 1px 1px black;
+  text-align: center;
+}

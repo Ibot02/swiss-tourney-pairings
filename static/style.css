@@ -213,3 +213,9 @@ div.match {
   text-shadow: 1px 1px black;
   text-align: center;
 }
+.note {
+  color: white;
+  padding: 2em;
+  border: solid black 2px;
+  border-radius: 1em;
+}

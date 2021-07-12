@@ -41,7 +41,7 @@ main = do
         , subs = [uriSub HandleURI]
         , logLevel = Off}
 
-getPlayers :<|> putPlayers :<|> getResults :<|> putResults :<|> nextRound = client (Proxy @ ServersideExtras)
+getPlayers :<|> {- putPlayerDrop :<|> -} getData :<|> putResult :<|> nextRound = client (Proxy @ ServersideExtras)
 
 getPageWithData :: (Maybe PageData) -> URI -> Maybe (RootLink, Page)
 getPageWithData pData' uri = do
@@ -55,31 +55,17 @@ updatePage NoOp = pure ()
 updatePage (ChangeURI u) = scheduleIO (pushURI u >> pure NoOp)
 updatePage (HandleURI u) = case route (Proxy :: Proxy ClientRoutes) clientPages u of
                                 Left _ -> pure ()
-                                Right (p@(r,p')) -> id %= Just . maybe (r, Page (PageData [] []) True p') (switchPage p)
-updatePage (PlayerEntryAction (ChangePlayerInputField s)) = _Just . _2 . pageNav . _PagePlayerInput . _1 .= s
-updatePage (PlayerEntryAction ApplyPlayerInput) = zoom (_Just . _2) $ do
-                    p <- preuse (pageNav . _PagePlayerInput)
-                    case p of
-                        Nothing -> return ()
-                        Just ((filter (/= "") . lines -> players), (fromMaybe (PageStandings Nothing) -> nextPage)) -> do
-                            pageData . pagePlayers .= players
-                            scheduleIO $ return $ ChangeURI $ goPage nextPage
-                            scheduleIO $ do
-                                runClientM $ putPlayers players
-                                return NoOp
-updatePage (ChangeResult round changes) = zoom (_Just . _2 . pageData . pageResults . ix round . roundData) $ do
-                    forM_ changes $ \(p, r) ->
-                        ix p %= (case r of
-                            (Just r) -> Just . maybe (r, False) (_1 .~ r)
-                            Nothing -> const Nothing
-                            )
-                    (changes' :: [(Int, Maybe (Result, Drop))]) <- fmap catMaybes $ forM changes $ \(p, _) -> fmap ((,) p) <$> preuse (ix p)
-                    scheduleIO $ do
-                        runClientM $ putResults round changes'
-                        return NoOp
-updatePage AddRound = do
-        _Just . _2 . pageData %= (\(PageData players results) -> PageData players $ results <> [RoundData $ replicate (length players) Nothing])
-        scheduleIO $ do
-            runClientM nextRound
-            return NoOp
---     updatePage (PlayerDrop player) =
+                                Right p -> _Just %= switchPage p
+-- updatePage (PlayerDrop player) =
+updatePage (ChangeResult matchID result) = scheduleIO $ do
+        newMatch <- runClientM $ putResult matchID result
+        case newMatch of
+            Right (Just newMatch) -> pure $ HandleResult matchID newMatch
+            _ -> pure NoOp
+updatePage (HandleResult matchID matchData) = _Just . _2 . pageData . onMatchID matchID .= matchData
+updatePage ComputeNextPairings = scheduleIO $ (runClientM nextRound) >>= \case
+        Right (Just (roundID, matches)) -> pure $ HandleNextPairings roundID matches
+        _ -> pure NoOp
+updatePage (HandleNextPairings roundID matches) = do
+    _Just . _2 . pageData . currentRound .= roundID
+    _Just . _2 . pageData . rounds <>= [matches]

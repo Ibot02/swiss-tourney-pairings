@@ -8,6 +8,9 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE ViewPatterns #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE LambdaCase #-}
 module Main where
 
 import Common
@@ -17,8 +20,8 @@ import qualified Data.Text as T
 import Data.Char (toLower)
 import Data.Maybe (fromJust, fromMaybe)
 import Data.Proxy
-import GHC.Generics
-import Data.Aeson
+import GHC.Generics hiding (to)
+import Data.Aeson hiding ((.=))
 import Data.Aeson.TH
 import Servant
 import qualified Lucid as L
@@ -32,6 +35,8 @@ import qualified System.Environment as Env
 import Text.Read (readMaybe)
 import System.FilePath
 
+import Data.List (sort, groupBy)
+
 import Control.Monad (when, forM_)
 import Control.Concurrent.STM.TVar
 import Control.Lens
@@ -40,8 +45,11 @@ import GHC.Conc
 
 import Miso
 
-addResult (PageData players []) = PageData players $ [RoundData $ replicate (length players) Nothing]
-addResult d = d
+import Control.Monad.State
+import Control.Monad.Writer
+import System.Random
+
+import Debug.Trace
 
 main = do
     p' <- Env.lookupEnv "PORT"
@@ -54,13 +62,35 @@ main = do
     IO.hPutStrLn IO.stderr $ "Starting Server on port " ++ show p
     IO.hPutStrLn IO.stderr $ "Serving static files from " ++ staticPath
     IO.hPutStrLn IO.stderr $ "Looking for data in " ++ dataPath
-    (maybe (PageData [] []) addResult -> (PageData players results)) <- decodeFileStrict $ dataPath <> "pageData.json"
-    (playersV, resultsV) <- atomically $ do
-        p <- newTVar players
-        r <- newTVar results
-        return (p,r)
-    run p $ serve (Proxy @ API) (static staticPath :<|> serverHandlers playersV resultsV :<|> dataHandlers playersV resultsV :<|> pure manifest :<|> Tagged handle404) where
-        static path = serveDirectoryWith (defaultWebAppSettings path)
+    pageData <- decodeFileStrict $ dataPath <> "pageData.json"
+    let defaultPageData = PageData [ParticipantData "Example" 1 Nothing] 2 [] 1 Nothing (Top8Data mempty) 0
+    case pageData of
+        Nothing -> do
+            IO.hPutStrLn IO.stderr $ "No pageData found, aborting"
+        Just pageData -> do
+            pageDataV <- atomically $ newTVar pageData
+            let incrementRound = do
+                    pageData <- readTVar pageDataV
+                    if (pageData ^. currentRound) < (pageData ^. numRounds)
+                    then do
+                        case makePairings pageData of
+                            Nothing -> return Nothing
+                            Just (nextRound, matches) -> do
+                                let newPageData = pageData
+                                        & currentRound .~ nextRound
+                                        & rounds <>~ [matches]
+                                writeTVar pageDataV newPageData
+                                return $ Just (nextRound, matches)
+                    else return Nothing
+                incrementTillRoundOneOrGreater = do
+                    pageData <- readTVar pageDataV
+                    if (pageData ^. currentRound) < 1 then do
+                        incrementRound
+                        incrementTillRoundOneOrGreater
+                    else return ()
+            atomically $ incrementTillRoundOneOrGreater
+            run p $ serve (Proxy @ API) (static staticPath :<|> serverHandlers pageDataV :<|> dataHandlers pageDataV :<|> pure manifest :<|> Tagged handle404) where
+                static path = serveDirectoryWith (defaultWebAppSettings path)
 
 type ServerRoutes = QueryFlag "interactive" :> ToServerRoutes ClientRoutes Wrapper Action
 
@@ -141,43 +171,169 @@ handle404 _ respond = respond $ responseLBS
     [("Content-Type", "text/html")] $
         renderBS $ toHtml $ Wrapper ("/", True, the404)
 
-serverHandlers :: TVar [PlayerName] -> TVar [RoundData] -> Server ServerRoutes
-serverHandlers playersV resultsV interactive = mainPage :<|> roundPage :<|> standingsPage :<|> playerPage :<|> playersPage where
+serverHandlers :: TVar PageData -> Server ServerRoutes
+serverHandlers pageDataV interactive = mainPage :<|> roundPage :<|> standingsPage :<|> playerPage :<|> playersPage where
     mainPage = send "./" interactive $ PageStandings Nothing
     roundPage r = send "../../" interactive $ PageRound r
     standingsPage r = send "../" interactive $ PageStandings $ Just r
     playerPage r = send "../../" interactive $ PagePlayer r
-    playersPage = send' "../../" interactive $ \players -> PagePlayerInput (unlines players) Nothing
-    send root interactive p = send' root interactive (const p)
-    send' root interactive p = liftIO $ do
-        (players, results) <- atomically $ do
-            p <- readTVar playersV
-            r <- readTVar resultsV
-            return (p,r)
-        pure $ Wrapper (root, interactive, viewPage root (Page (PageData players results) interactive (p players)))
+    playersPage = send "../../" interactive $ PagePlayers
+    send root interactive p = liftIO $ do
+        pageData <- atomically $ readTVar pageDataV
+        pure $ Wrapper (root, interactive, viewPage root (Page pageData interactive p))
 
-dataHandlers :: TVar [PlayerName] -> TVar [RoundData] -> Server ServersideExtras
-dataHandlers playersV resultsV = getPlayers :<|> putPlayers :<|> getResults :<|> putResults :<|> postNextRound where
-    getPlayers = liftIO $ atomically $ readTVar playersV
-    putPlayers players = liftIO $ do
-        atomically $ do
-            oldPlayers <- readTVar playersV
-            if length oldPlayers == length players then
-                writeTVar playersV players
-            else do
-                writeTVar playersV players
-                writeTVar resultsV [RoundData $ replicate (length players) Nothing]
-        return ()
-    getResults = liftIO $ atomically $ readTVar resultsV
-    putResults round results = liftIO $ atomically $ do
-                forM_ results $ \(p, r) ->
-                    modifyTVar resultsV $ ix round . roundData . ix p .~ r
-                readTVar resultsV
+dataHandlers :: TVar PageData -> Server ServersideExtras
+dataHandlers pageDataV = getPlayers :<|> {- putPlayerDrop :<|> -} getData :<|> putResult :<|> postNextRound where
+    getPlayers = liftIO $ fmap (^.. participants . traverse . participantName) $ atomically $ readTVar pageDataV
+    putPlayerDrop playerID = undefined
+    getData = liftIO $ atomically $ readTVar pageDataV
+    putResult matchID result = liftIO $ atomically $ do
+            pageData <- readTVar pageDataV
+            case pageData ^? onMatchID matchID of
+                Nothing -> return Nothing
+                Just oldMatch -> do
+                    if --validation
+                        (length result <= oldMatch ^. seriesLength)
+                     && (all ((== (oldMatch ^. players . to length)) . length) result)
+                    then do
+                        let newMatch = results .~ result $ oldMatch
+                            newPageData = onMatchID matchID .~ newMatch $ pageData
+                        writeTVar pageDataV newPageData
+                        return $ Just newMatch
+                    else return $ Just oldMatch
     postNextRound = liftIO $ atomically $ do
-            p <- length <$> readTVar playersV
-            modifyTVar resultsV $ (<> [RoundData $ replicate p Nothing])
-        
+        pageData <- readTVar pageDataV
+        if (pageData ^. currentRound) < (pageData ^. numRounds)
+        then do
+            case makePairings pageData of
+                Nothing -> return Nothing
+                Just (nextRound, matches) -> do
+                    let newPageData = pageData
+                            & currentRound .~ nextRound
+                            & rounds <>~ [matches]
+                    writeTVar pageDataV newPageData
+                    return $ Just (nextRound, matches)
+        else return Nothing
+
+
+makePairings :: PageData -> Maybe (RoundID, [MatchData])
+makePairings pageData = (,) (round + 1) <$> pairings where
+    round = pageData ^. currentRound
+    newRound = (pageData ^. rounds . to length) + 1
+    ranks = listStandings pageData round ^.. traverse . _1
+    dropped = pageData ^.. participants . traverse . roundDropped . to (maybe False (<= newRound))
+    skipping = pageData ^.. participants . traverse . roundSkipped . to (== newRound)
+    rng = fst $ split $ foldl (\g _ -> snd $ split g) (pageData ^. rngSeed . to mkStdGen) $ pageData ^. rounds --different starting prng for each round, but deterministic
+    ignore = zipWith (||) dropped skipping
+    groupedByRank = fmap (fmap snd) $ groupBy (\x y -> fst x == fst y) $ sort $ fmap (\(x,y) -> (x,fst y)) $ filter (not . snd . snd) $ zip ranks $ ignore ^.. itraversed . withIndex
+    need3Way = (length (concat groupedByRank) `mod` 2) == 1
+    hasBeenIn3Way = pageData ^.. rounds . traverse . traverse . players . filtered ((>2) . length) . traverse
+    previousPairings = pageData ^.. rounds . traverse . traverse . players
+    isPreviousPairing p1 p2 = any (\xs -> p1 `elem` xs && p2 `elem` xs) previousPairings
+    get3Way = zoom (alongside reversed id) $ do
+        x <- popFirstRandom
+        guard $ x `notElem` hasBeenIn3Way
+        y <- popInnerRandom
+        guard $ y `notElem` hasBeenIn3Way
+        z <- popInnerRandom
+        guard $ z `notElem` hasBeenIn3Way
+        guard $ not $ all (uncurry isPreviousPairing) [(x,y),(x,z),(y,z)]
+        m <- return $ MatchData [z,y,x] 1 []
+        () <- traceShow m $ return ()
+        return m
+    getMatch = do
+        x <- popFirstRandom
+        y <- popInnerRandom
+        guard $ not $ isPreviousPairing x y
+        m <- return $ MatchData [x,y] 1 []
+        () <- traceShow m $ return ()
+        return m
+    getMatches = do
+        moreMatches <- gets $ has $ _1 . traverse . traverse
+        if moreMatches then do
+            x <- getMatch
+            xs <- getMatches
+            return $ x:xs
+        else return []
+    pairings = (^? _head) $ (id :: [a] -> [a]) $ flip evalStateT (groupedByRank, rng) $ do
+        traceM $ "Generating pairings for round " <> show newRound
+        if need3Way
+        then do
+            x <- get3Way
+            xs <- getMatches
+            return $ xs <> [x]
+        else getMatches
+
+popFirstRandom :: (MonadPlus m) => StateT ([[a]], StdGen) m a
+popFirstRandom = do
+    _1 %= filter (not . null)
+    xs'' <- zoom _1 popS
+    xs <- case xs'' of
+        Nothing -> mzero
+        Just xs -> return xs
+    (x,xs') <- zoom _2 $ popOneRandomly xs
+    when (not (null xs')) $ _1 %= (xs':)
+    pure x
+
+popS :: (Monad m) => StateT [a] m (Maybe a)
+popS = state $ \case
+    [] -> (Nothing, [])
+    x:xs -> (Just x,xs)
+
+--pop an element from the first inner list randomly, if that fails try the second and so on
+popInnerRandom :: (MonadPlus m) => StateT ([[a]], StdGen) m a
+popInnerRandom = do
+    _1 %= filter (not . null)
+    xs <- use _1
+    (x, xs') <- zoom _2 $ do
+        foldr mplus mzero $ fmap (\(ys, x, xs) -> do
+            (r, x') <- popAnyRandomly x
+            return (r, unzipper (ys, x', xs))
+            ) $ zippered xs
+    _1 .= xs'
+    return x
+
+zippered :: [a] -> [([a],a,[a])]
+zippered [] = []
+zippered (x:xs) = helper ([],x,xs) where
+    helper x@(_,_,[]) = [x]
+    helper x@(ys,y,y':xs) = x:helper (y:ys,y',xs)
+
+unzipper :: ([a],a,[a]) -> [a]
+unzipper ([],x,xs) = x:xs
+unzipper (y:ys,x,xs) = unzipper (ys,y,x:xs)
+
+popAnyRandomly :: (MonadPlus m) => [a] -> StateT StdGen m (a, [a])
+popAnyRandomly xs = do
+    let l = length xs
+    if l == 0 then mzero else do
+        order <- randomPermutation (l-1)
+        foldr mplus mzero $ fmap (\i -> case pop i xs of
+            Nothing -> mzero
+            Just (x,xs') -> return (x,xs')) order
+
+popOneRandomly :: (MonadPlus m) => [a] -> StateT StdGen m (a, [a])
+popOneRandomly xs = do
+    i <- state $ randomR (0, length xs - 1)
+    case pop i xs of
+        Nothing -> mzero
+        Just (x,xs') -> return (x,xs')
+
+randomPermutation :: (Monad m) => Int -> StateT StdGen m [Int]
+randomPermutation 0 = return [0]
+randomPermutation n = do
+    i <- state $ randomR (0,n)
+    p <- randomPermutation (n-1)
+    return $ insertTo i p where
+        insertTo 0 p = let incremented = increment p in incremented `seq` 0:incremented
+        insertTo n (!p:ps) = p:insertTo (n-1) ps
+        increment [] = []
+        increment (!x:xs) = let incremented = increment xs in incremented `seq` succ x : incremented
+
+pop :: Int -> [a] -> Maybe (a, [a])
+pop _ [] = Nothing
+pop 0 (x:xs) = Just (x,xs)
+pop n (x:xs) = _Just . _2 %~ (x:) $ pop (n-1) xs
 
 $(deriveJSON Data.Aeson.TH.defaultOptions{fieldLabelModifier = (camelTo2 '_' . drop (length ("manifestIcon" :: String)))} ''ManifestIcon)
 $(deriveJSON Data.Aeson.TH.defaultOptions{fieldLabelModifier = (camelTo2 '_' . drop (length ("manifest" :: String)))} ''Manifest)
-

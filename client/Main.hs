@@ -41,7 +41,7 @@ main = do
         , subs = [uriSub HandleURI]
         , logLevel = Off}
 
-getPlayers :<|> {- putPlayerDrop :<|> -} getData :<|> putResult :<|> nextRound = client (Proxy @ ServersideExtras)
+getPlayers :<|> {- putPlayerDrop :<|> -} getData :<|> putResult :<|> nextRound :<|> writeToDisk = client (Proxy @ ServersideExtras)
 
 getPageWithData :: (Maybe PageData) -> URI -> Maybe (RootLink, Page)
 getPageWithData pData' uri = do

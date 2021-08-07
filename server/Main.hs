@@ -62,7 +62,8 @@ main = do
     IO.hPutStrLn IO.stderr $ "Starting Server on port " ++ show p
     IO.hPutStrLn IO.stderr $ "Serving static files from " ++ staticPath
     IO.hPutStrLn IO.stderr $ "Looking for data in " ++ dataPath
-    pageData <- decodeFileStrict $ dataPath <> "pageData.json"
+    let pageDataPath = dataPath <> "pageData.json"
+    pageData <- decodeFileStrict pageDataPath
     let defaultPageData = PageData [ParticipantData "Example" 1 Nothing] 2 [] 1 Nothing (Top8Data mempty) 0
     case pageData of
         Nothing -> do
@@ -89,7 +90,7 @@ main = do
                         incrementTillRoundOneOrGreater
                     else return ()
             atomically $ incrementTillRoundOneOrGreater
-            run p $ serve (Proxy @ API) (static staticPath :<|> serverHandlers pageDataV :<|> dataHandlers pageDataV :<|> pure manifest :<|> Tagged handle404) where
+            run p $ serve (Proxy @ API) (static staticPath :<|> serverHandlers pageDataV :<|> dataHandlers pageDataV pageDataPath :<|> pure manifest :<|> Tagged handle404) where
                 static path = serveDirectoryWith (defaultWebAppSettings path)
 
 type ServerRoutes = QueryFlag "interactive" :> ToServerRoutes ClientRoutes Wrapper Action
@@ -182,8 +183,8 @@ serverHandlers pageDataV interactive = mainPage :<|> roundPage :<|> standingsPag
         pageData <- atomically $ readTVar pageDataV
         pure $ Wrapper (root, interactive, viewPage root (Page pageData interactive p))
 
-dataHandlers :: TVar PageData -> Server ServersideExtras
-dataHandlers pageDataV = getPlayers :<|> {- putPlayerDrop :<|> -} getData :<|> putResult :<|> postNextRound where
+dataHandlers :: TVar PageData -> FilePath -> Server ServersideExtras
+dataHandlers pageDataV pageDataPath = getPlayers :<|> {- putPlayerDrop :<|> -} getData :<|> putResult :<|> postNextRound :<|> writeToDisk where
     getPlayers = liftIO $ fmap (^.. participants . traverse . participantName) $ atomically $ readTVar pageDataV
     putPlayerDrop playerID = undefined
     getData = liftIO $ atomically $ readTVar pageDataV
@@ -214,6 +215,9 @@ dataHandlers pageDataV = getPlayers :<|> {- putPlayerDrop :<|> -} getData :<|> p
                     writeTVar pageDataV newPageData
                     return $ Just (nextRound, matches)
         else return Nothing
+    writeToDisk = liftIO $ do
+        pageData <- atomically $ readTVar pageDataV
+        encodeFile pageDataPath pageData
 
 
 makePairings :: PageData -> Maybe (RoundID, [MatchData])

@@ -92,6 +92,7 @@ type ServersideExtras = GetPlayers
                       :<|> GetData
                       :<|> PutResult
                       :<|> NextRound
+                      :<|> WriteToDisk
 
 type MainPage = View Action
 type RoundPage = "round" :> Capture "round" Int :> View Action
@@ -104,6 +105,7 @@ type GetPlayers = "data" :> "players" :> Get '[JSON] [PlayerName]
 type GetData = "data" :> Get '[JSON] PageData
 type PutResult = "data" :> "results" :> Capture "match" MatchID :> ReqBody '[JSON] [[Int]] :> Put '[JSON] (Maybe MatchData)
 type NextRound = "data" :> "results" :> "nextRound" :> Post '[JSON] (Maybe (RoundID, [MatchData]))
+type WriteToDisk = "data" :> "write" :> Put '[JSON] ()
 
 data Action = NoOp
             | ChangeURI URI

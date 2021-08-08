@@ -306,10 +306,13 @@ listStandings pData round = let
     numPlayers = length $ pData ^. participants
     playerMatches = flip fmap [0..numPlayers - 1] $ \i ->
         (,) i $ flip fmap [0..round - 1] $ \r -> pData ^? rounds . ix r . traverse .  filtered (elemOf (players . traverse) i)
-    playerPointsByMatch = flip fmap playerMatches $ \(i, matches) -> flip fmap matches $ \case
-        Nothing -> 2 --the skipped round counts for 2 points
-        Just (MatchData players _ results) ->
+    playerPointsByMatch = flip fmap playerMatches $ \(i, matches) -> flip fmap (giveSkippedPoints i matches) $ \case
+        Left n -> n
+        Right (MatchData players _ results) ->
             sum $ flip fmap results $ \result -> sumOf (traverse . filtered ((==i) . fst) . _2) $ zip players result
+    giveSkippedPoints i matches = flip fmap (zip [(1::RoundID)..] matches) $ \case
+        (r, Nothing) -> if (pData ^? participants . ix i . roundSkipped) == Just r then Left 2 else Left 0
+        (_, Just m) -> Right m
     playerPoints = fmap sum playerPointsByMatch
     playerOppPoints = flip fmap playerMatches $ \(i, catMaybes -> matches) -> case length matches of
         0 -> 0

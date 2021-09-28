@@ -37,6 +37,8 @@ import System.FilePath
 
 import Data.List (sort, groupBy)
 
+import qualified Data.Map as Map
+
 import Control.Monad (when, forM_)
 import Control.Concurrent.STM.TVar
 import Control.Lens
@@ -64,7 +66,7 @@ main = do
     IO.hPutStrLn IO.stderr $ "Looking for data in " ++ dataPath
     let pageDataPath = dataPath <> "pageData.json"
     pageData <- decodeFileStrict pageDataPath
-    let defaultPageData = PageData [ParticipantData "Example" 1 Nothing] 2 [] 1 Nothing (Top8Data mempty) 0
+    let defaultPageData = PageData [ParticipantData "Example" 1 Nothing] 2 [] 1 Nothing (PlayoffData mempty) 0
     case pageData of
         Nothing -> do
             IO.hPutStrLn IO.stderr $ "No pageData found, aborting"
@@ -173,8 +175,9 @@ handle404 _ respond = respond $ responseLBS
         renderBS $ toHtml $ Wrapper ("/", True, the404)
 
 serverHandlers :: TVar PageData -> Server ServerRoutes
-serverHandlers pageDataV interactive = mainPage :<|> roundPage :<|> standingsPage :<|> playerPage :<|> playersPage where
+serverHandlers pageDataV interactive = mainPage :<|> playoffsPage :<|> roundPage :<|> standingsPage :<|> playerPage :<|> playersPage where
     mainPage = send "./" interactive $ PageStandings Nothing
+    playoffsPage = send "../../" interactive $ PagePlayoffs
     roundPage r = send "../../" interactive $ PageRound r
     standingsPage r = send "../" interactive $ PageStandings $ Just r
     playerPage r = send "../../" interactive $ PagePlayer r
@@ -184,7 +187,7 @@ serverHandlers pageDataV interactive = mainPage :<|> roundPage :<|> standingsPag
         pure $ Wrapper (root, interactive, viewPage root (Page pageData interactive p))
 
 dataHandlers :: TVar PageData -> FilePath -> Server ServersideExtras
-dataHandlers pageDataV pageDataPath = getPlayers :<|> {- putPlayerDrop :<|> -} getData :<|> putResult :<|> postNextRound :<|> writeToDisk where
+dataHandlers pageDataV pageDataPath = getPlayers :<|> {- putPlayerDrop :<|> -} getData :<|> putResult :<|> postNextRound :<|> postInitPlayoffs :<|> getMatches :<|> writeToDisk where
     getPlayers = liftIO $ fmap (^.. participants . traverse . participantName) $ atomically $ readTVar pageDataV
     putPlayerDrop playerID = undefined
     getData = liftIO $ atomically $ readTVar pageDataV
@@ -198,7 +201,7 @@ dataHandlers pageDataV pageDataPath = getPlayers :<|> {- putPlayerDrop :<|> -} g
                      && (all ((== (oldMatch ^. players . to length)) . length) result)
                     then do
                         let newMatch = results .~ result $ oldMatch
-                            newPageData = onMatchID matchID .~ newMatch $ pageData
+                            newPageData = (if not (isUndecided newMatch) then fromMaybe id $ matchID ^? _PlayoffMatch . to propagateResult else id) $ onMatchID matchID .~ newMatch $ pageData
                         writeTVar pageDataV newPageData
                         return $ Just newMatch
                     else return $ Just oldMatch
@@ -215,10 +218,48 @@ dataHandlers pageDataV pageDataPath = getPlayers :<|> {- putPlayerDrop :<|> -} g
                     writeTVar pageDataV newPageData
                     return $ Just (nextRound, matches)
         else return Nothing
+    postInitPlayoffs players = liftIO $ atomically $ do
+        pageData <- readTVar pageDataV
+        case (pageData ^. playoffParticipants, players) of
+            (Nothing, [p1,p2,p3,p4]) -> do
+                writeTVar pageDataV $ pageData
+                    & playoffParticipants .~ Just players
+                    & playoffData .~ PlayoffData (Map.fromList [(Semifinals 0, Right (MatchData [p1, p4] 3 [])), (Semifinals 1, Right (MatchData [p2, p3] 3 [])), (Finals, Left (3, [Left (Semifinals 0, True), Left (Semifinals 1, True)])), (MatchForThird, Left (1, [Left (Semifinals 0, False), Left (Semifinals 1, False)]))])
+            _ -> return ()
+    getMatches = liftIO $ atomically $ do
+        pageData <- readTVar pageDataV
+        if (has (playoffParticipants . _Just) pageData) then
+            return $ pageData ^.. playoffData . playoffMatches . to Map.toList . traverse . filtered (\(_,m) -> (m ^? _Right . to isUndecided) == Just True) . _1 . to PlayoffMatch
+        else
+            return $ fmap (SwissMatch (pageData ^. currentRound) . fst) $ filter (isUndecided . snd) $ imap (,) $ pageData ^.. rounds . ix (pageData ^. currentRound) . traverse
     writeToDisk = liftIO $ do
         pageData <- atomically $ readTVar pageDataV
         encodeFile pageDataPath pageData
 
+isUndecided :: MatchData -> Bool
+isUndecided (MatchData [p1, p2] sl results) = length results < sl && all ((< sl) . (*2)) (foldr (\[r1, r2] (x,y) -> if r1 > r2 then (x+1, y) else if r2 > r1 then (x, y+1) else (x,y)) (0,0) results ^.. both)
+isUndecided (MatchData players sl results) = length results < sl
+
+propagateResult :: PlayoffMatchID -> PageData -> PageData
+propagateResult matchID pData = let
+        (winner, loser) = pData ^?! playoffData . playoffMatches . ix matchID . _Right . to matchResult . _Just
+        in pData
+            & playoffData . playoffMatches . traverse . _Left . _2 . traverse %~ updateMatchResult matchID (winner, loser)
+            & playoffData . playoffMatches . traverse %~ checkFinalizedMatch
+
+updateMatchResult :: PlayoffMatchID -> (PlayerID, PlayerID) -> Either (PlayoffMatchID, Bool) PlayerID -> Either (PlayoffMatchID, Bool) PlayerID
+updateMatchResult matchID (winner, loser) (Left (matchID', useWinner)) | matchID == matchID' = Right $ if useWinner then winner else loser
+updateMatchResult _ _ x = x
+
+checkFinalizedMatch :: Either (Int, [Either (PlayoffMatchID, Bool) PlayerID]) MatchData -> Either (Int, [Either (PlayoffMatchID, Bool) PlayerID]) MatchData
+checkFinalizedMatch (Left (sl, players)) | hasn't (traverse . _Left) players = Right $ MatchData (players ^.. traverse . _Right) sl []
+checkFinalizedMatch x = x
+
+matchResult :: MatchData -> Maybe (PlayerID, PlayerID)
+matchResult (MatchData [p1, p2] sl results) = let
+        (s1, s2) = foldr (\[r1, r2] (x,y) -> if r1 > r2 then (x+1, y) else if r2 > r1 then (x, y+1) else (x,y)) (0,0) results
+        in if s1 * 2 > sl then Just (p1, p2) else if s2 * 2 > sl then Just (p2, p1) else Nothing
+matchResult _ = Nothing
 
 makePairings :: PageData -> Maybe (RoundID, [MatchData])
 makePairings pageData = (,) (round + 1) <$> pairings where

@@ -4,6 +4,7 @@
 module Main where
 
 import Data.List (sortOn, intersperse)
+import Data.Maybe (catMaybes)
 
 import Options.Applicative as OP
 
@@ -25,6 +26,7 @@ import Common
 data Command = EnterResults
              | EnterResult (Maybe String)
              | NextRound
+             | InitPlayoffs
              | WriteToDisk
              deriving (Eq, Ord, Show)
 
@@ -38,6 +40,7 @@ parseCommand = (,)
                 <*> subparser
                   (  command "results" (info (pure EnterResults) ( progDesc "Batch enter multiple match results" ))
                   <> command "result" (info resultCommand ( progDesc "Enter a match result" ))
+                  <> command "initPlayoffs" (info (pure InitPlayoffs) ( progDesc "Initialize the playoff phase" ))
                   <> command "advance" (info (pure NextRound) ( progDesc "Generate Pairings for the following round"))
                   <> command "write" (info (pure WriteToDisk) ( progDesc "Write current state to disk")))
 
@@ -61,8 +64,10 @@ getPlayers :: ClientM [PlayerName]
 getData :: ClientM PageData
 putResult :: MatchID -> [[Int]] -> ClientM (Maybe MatchData)
 nextRound :: ClientM (Maybe (RoundID, [MatchData]))
+initPlayoffs :: [PlayerID] -> ClientM ()
+getMatches :: ClientM [MatchID]
 writeToDisk :: ClientM ()
-(getPlayers :<|> getData :<|> putResult :<|> nextRound :<|> writeToDisk) = client api
+(getPlayers :<|> getData :<|> putResult :<|> nextRound :<|> initPlayoffs :<|> getMatches :<|> writeToDisk) = client api
 
 main :: IO ()
 main = do
@@ -75,7 +80,8 @@ main = do
         NextRound -> run nextRound e >> return ()
         EnterResult Nothing -> do
             p <- run getData e
-            m <- queryMatch p
+            ms <- run getMatches e
+            m <- queryMatch p ms
             r <- queryResult m p
             run (putResult m r) e
             return ()
@@ -83,15 +89,25 @@ main = do
             p <- run getData e
             putStrLn "Not Yet Implemented"
         EnterResults -> putStrLn "Not Yet Implemented"
+        InitPlayoffs -> do
+            p <- run getData e
+            players <- queryPlayers 4 p
+            run (initPlayoffs players) e
 
-queryMatch :: PageData -> IO MatchID
-queryMatch p = do
-    case isSwissDone p of
-        True -> putStrLn "Not Yet Implemented" >> return undefined
-        False -> choice $ fmap (\(i,m) -> (showMatch m p, SwissMatch ((p ^. currentRound) - 1) i)) $ filter (\(_, m) -> (m ^. results) == []) $ imap (,) $ p ^.. rounds . ix ((p ^. currentRound) - 1) . traverse
+queryMatch :: PageData -> [MatchID] -> IO MatchID
+queryMatch p ms =
+    choice $ catMaybes $ fmap (\matchID -> p ^? onMatchID matchID . to (\m -> (showMatch m p, matchID))) ms
+
+queryPlayers :: Int -> PageData -> IO [PlayerID]
+queryPlayers n p = choose' n (imap (\i a -> (a,i)) $ p ^.. participants . folded . participantName) [] where
+        choose' :: (Eq a) => Int -> [(String, a)] -> [a] -> IO [a]
+        choose' 0 _ r = return $ reverse r
+        choose' n options results = do
+            c <- choice options
+            choose' (n-1) (filter ((/= c) . snd) options) (c:results)
 
 isSwissDone :: PageData -> Bool
-isSwissDone _ = False
+isSwissDone pData = has (playoffParticipants . _Just) pData
 
 showMatch :: MatchData -> PageData -> String
 showMatch m p = concat $ intersperse " vs " $ m ^.. players . traverse . to (\pl -> p ^?! participants . ix pl . participantName)
@@ -99,9 +115,10 @@ showMatch m p = concat $ intersperse " vs " $ m ^.. players . traverse . to (\pl
 queryResult :: MatchID -> PageData -> IO [[Int]]
 queryResult m p = do
     let md = p ^?! onMatchID m
+        prevResult = md ^. results
         pls = md ^. players
         sl = md ^. seriesLength
-    choice (showPossibleResults pls sl p)
+    (prevResult <>) <$> choice (showPossibleResults pls p)
 
 choice :: [(String, a)] -> IO a
 choice options = do
@@ -110,8 +127,8 @@ choice options = do
     r <- getLine
     return $ snd $ options !! read r
 
-showPossibleResults :: [PlayerID] -> Int -> PageData -> [(String, [[Int]])]
-showPossibleResults ps 1 p = fmap (\r -> (showResult r p, pointValues ps r : [])) $ sortOn (maximum . fmap length) $ possibleResults ps
+showPossibleResults :: [PlayerID] -> PageData -> [(String, [[Int]])]
+showPossibleResults ps p = fmap (\r -> (showResult r p, pointValues ps r : [])) $ sortOn (maximum . fmap length) $ possibleResults ps
 
 showResult :: [[PlayerID]] -> PageData -> String
 showResult ps p = concat $ intersperse " > " $ concatMap (intersperse " = " . fmap (\player -> p ^?! participants . ix player . participantName)) ps

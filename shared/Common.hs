@@ -46,13 +46,13 @@ data PageData = PageData {
     , _numRounds :: Int
     , _rounds :: [[MatchData]]
     , _currentRound :: RoundID
-    , _top8Participants :: Maybe [PlayerID]
-    , _top8Data :: Top8Data
+    , _playoffParticipants :: Maybe [PlayerID]
+    , _playoffData :: PlayoffData
     , _rngSeed :: Int
     } deriving (Eq, Ord, Show)
 
-data Top8Data = Top8Data {
-      _top8Matches :: Map Top8MatchID (Either (Int, [Either (Top8MatchID, Bool) PlayerID]) MatchData)
+data PlayoffData = PlayoffData {
+      _playoffMatches :: Map PlayoffMatchID (Either (Int, [Either (PlayoffMatchID, Bool) PlayerID]) MatchData)
     } deriving (Eq, Ord, Show)
 
 type PlayerName = String
@@ -66,14 +66,13 @@ data ParticipantData = ParticipantData {
 type RoundID = Int
 type PlayerID = Int
 data MatchID = SwissMatch RoundID Int
-             | Top8Match Top8MatchID
+             | PlayoffMatch PlayoffMatchID
              deriving (Eq, Ord, Show)
 
-data Top8MatchID = Finals
-                 | Semifinals Int
-                 | Quarterfinals Int
-                 | MatchForThird
-                 deriving (Eq, Ord, Show)
+data PlayoffMatchID = Finals
+                    | Semifinals Int
+                    | MatchForThird
+                    deriving (Eq, Ord, Show)
 
 data MatchData = MatchData {
           _players :: [PlayerID]
@@ -82,6 +81,7 @@ data MatchData = MatchData {
         } deriving (Eq, Ord, Show)
 
 type ClientRoutes = MainPage
+                    :<|> PlayoffsPage
                     :<|> RoundPage
                     :<|> StandingsPage
                     :<|> PlayerPage
@@ -92,9 +92,12 @@ type ServersideExtras = GetPlayers
                       :<|> GetData
                       :<|> PutResult
                       :<|> NextRound
+                      :<|> InitPlayoffs
+                      :<|> OpenMatches
                       :<|> WriteToDisk
 
 type MainPage = View Action
+type PlayoffsPage = "round" :> "top4" :> View Action
 type RoundPage = "round" :> Capture "round" Int :> View Action
 type StandingsPage = "standings" :> Capture "round" Int :> View Action
 type PlayerPage = "player" :> Capture "player" PlayerName :> View Action
@@ -105,6 +108,8 @@ type GetPlayers = "data" :> "players" :> Get '[JSON] [PlayerName]
 type GetData = "data" :> Get '[JSON] PageData
 type PutResult = "data" :> "results" :> Capture "match" MatchID :> ReqBody '[JSON] [[Int]] :> Put '[JSON] (Maybe MatchData)
 type NextRound = "data" :> "results" :> "nextRound" :> Post '[JSON] (Maybe (RoundID, [MatchData]))
+type InitPlayoffs = "data" :> "results" :> "nextRound" :> "playoffs" :> ReqBody '[JSON] [PlayerID] :> Post '[JSON] ()
+type OpenMatches = "data" :> "matches" :> Get '[JSON] [MatchID]
 type WriteToDisk = "data" :> "write" :> Put '[JSON] ()
 
 data Action = NoOp
@@ -125,6 +130,7 @@ data Page = Page {
             deriving (Eq, Ord, Show)
 
 data PageNav = PageRound Int
+             | PagePlayoffs
              | PageStandings (Maybe Int)
              | PagePlayer PlayerName
              | PagePlayers
@@ -133,43 +139,42 @@ data PageNav = PageRound Int
 $(makeLenses ''Page)
 $(makeLenses ''PageData)
 $(makeLenses ''ParticipantData)
-$(makeLenses ''Top8Data)
+$(makeLenses ''PlayoffData)
 $(makeLenses ''MatchData)
 $(makePrisms ''MatchID)
-$(makePrisms ''Top8MatchID)
+$(makePrisms ''PlayoffMatchID)
 $(makePrisms ''PageNav)
 $(makePrisms ''Action)
-$(A.deriveJSON A.defaultOptions{ A.sumEncoding = A.UntaggedValue, A.constructorTagModifier = map toLower } ''Top8MatchID)
+$(A.deriveJSON A.defaultOptions{ A.sumEncoding = A.UntaggedValue, A.constructorTagModifier = map toLower } ''PlayoffMatchID)
 $(A.deriveJSON A.defaultOptions{ A.sumEncoding = A.UntaggedValue, A.constructorTagModifier = map toLower } ''MatchID)
-instance A.ToJSON Top8Data where
-    toEncoding (Top8Data matches) = A.toEncoding $ Map.toList matches
-    toJSON (Top8Data matches) = A.toJSON $ Map.toList matches
-instance A.FromJSON Top8Data where
-    parseJSON = fmap (Top8Data . Map.fromList) . A.parseJSON
+instance A.ToJSON PlayoffData where
+    toEncoding (PlayoffData matches) = A.toEncoding $ Map.toList matches
+    toJSON (PlayoffData matches) = A.toJSON $ Map.toList matches
+instance A.FromJSON PlayoffData where
+    parseJSON = fmap (PlayoffData . Map.fromList) . A.parseJSON
 $(A.deriveJSON A.defaultOptions{ A.fieldLabelModifier = A.camelTo2 '_' . drop 1 } ''MatchData)
 $(A.deriveJSON A.defaultOptions{ A.fieldLabelModifier = A.camelTo2 '_' . drop 1 } ''ParticipantData)
 $(A.deriveJSON A.defaultOptions{ A.fieldLabelModifier = A.camelTo2 '_' . drop 1 } ''PageData)
 
 instance FromHttpApiData MatchID where
     parseUrlPiece = either (Left . T.pack) Right . Ap.parseOnly parser where
-        parser = parseSwissMatchID <|> (Top8Match <$> parseTop8MatchID)
+        parser = parseSwissMatchID <|> (PlayoffMatch <$> parsePlayoffMatchID)
         parseSwissMatchID = do
             Ap.char 'R'
             roundNumber <- Ap.decimal
             Ap.char 'M'
             matchIndex <- Ap.decimal
             return $ SwissMatch roundNumber matchIndex
-        parseTop8MatchID = (Finals <$ Ap.string "finals") <|> (Semifinals <$> (Ap.string "semifinals" >> Ap.decimal)) <|> (Quarterfinals <$> (Ap.string "quarterfinals" >> Ap.decimal)) <|> (MatchForThird <$ (Ap.string "matchForThird"))
+        parsePlayoffMatchID = (Finals <$ Ap.string "finals") <|> (Semifinals <$> (Ap.string "semifinals" >> Ap.decimal)) <|> (MatchForThird <$ (Ap.string "matchForThird"))
 
 instance ToHttpApiData MatchID where
     toUrlPiece (SwissMatch r i) = T.pack $ "R" <> show r <> "M" <> show i
-    toUrlPiece (Top8Match Finals) = "finals"
-    toUrlPiece (Top8Match (Semifinals i)) = T.pack $ "semifinals" <> show i
-    toUrlPiece (Top8Match (Quarterfinals i)) = T.pack $ "quarterfinals" <> show i
-    toUrlPiece (Top8Match MatchForThird) = "matchForThird"
+    toUrlPiece (PlayoffMatch Finals) = "finals"
+    toUrlPiece (PlayoffMatch (Semifinals i)) = T.pack $ "semifinals" <> show i
+    toUrlPiece (PlayoffMatch MatchForThird) = "matchForThird"
 
 onMatchID (SwissMatch round index) = rounds . ix round . ix index
-onMatchID (Top8Match index) = top8Data . top8Matches . ix index . _Right
+onMatchID (PlayoffMatch index) = playoffData . playoffMatches . ix index . _Right
 
 -- clientPages [] _ = (PagePlayerInput $ PagePlayerInputData "" Nothing)
 --                    :<|> (\r -> PagePlayerInput $ PagePlayerInputData "" $ Just $ PageRound r)
@@ -177,6 +182,7 @@ onMatchID (Top8Match index) = top8Data . top8Matches . ix index . _Right
 --                    :<|> (\p -> PagePlayerInput $ PagePlayerInputData "" $ Just $ PagePlayer p)
 --                    :<|> (PagePlayerInput $ PagePlayerInputData "" Nothing)
 clientPages = ("./", PageStandings Nothing)
+            :<|> ("../../", PagePlayoffs)
             :<|> (\r -> ("../../", PageRound r))
             :<|> (\r -> ("../../", PageStandings (Just r)))
             :<|> (\p -> ("../../", PagePlayer p))
@@ -188,7 +194,7 @@ instance HasLink Page where
 
 -- linkMainPage :<|> linkRoundPage :<|> linkStandingsPage :<|> linkPlayerPage :<|> linkPlayersPage = allLinks (Proxy @ ClientRoutes)
 -- goMainPage = linkURI linkMainPage
-(linkURI -> goMainPage) :<|> (fmap linkURI -> goRoundPage) :<|> (fmap linkURI -> goStandingsPage) :<|> (fmap linkURI -> goPlayerPage) :<|> (linkURI -> goPlayersPage) = allLinks (Proxy @ ClientRoutes)
+(linkURI -> goMainPage) :<|> (linkURI -> goPlayoffsPage) :<|> (fmap linkURI -> goRoundPage) :<|> (fmap linkURI -> goStandingsPage) :<|> (fmap linkURI -> goPlayerPage) :<|> (linkURI -> goPlayersPage) = allLinks (Proxy @ ClientRoutes)
 -- goMainPage :: [PlayerName] -> [RoundData] -> Bool -> URI
 -- goMainPage players results interactive = let (r :<|> _ :<|> _ :<|> _ :<|> _) = allLinks (Proxy @ ClientRoutes) players results (not interactive) in linkURI' LinkArrayElementPlain r
 -- goRoundPage :: [PlayerName] -> [RoundData] -> Bool -> Int -> URI
@@ -202,6 +208,7 @@ instance HasLink Page where
 
 goPage :: PageNav -> URI
 goPage (PageRound r) = goRoundPage r
+goPage PagePlayoffs = goPlayoffsPage
 goPage (PageStandings Nothing) = goMainPage
 goPage (PageStandings (Just r)) = goStandingsPage r
 goPage (PagePlayer p) = goPlayerPage p
@@ -220,18 +227,24 @@ viewPage root page@(Page pData interactive nav) = div_ [] ([
                 ] <> content
                 ) where
                     players = pData ^.. participants . traverse . participantName
+                    havePlayoffs = has (playoffParticipants . _Just) pData
                     header = header_ [] [
                           nav_ [] [
                               ul_ []
                                 [ li_ ((if has _PageStandings nav then (class_ "current" :) else id ) []) [
                                       a_ (hrefPage root $ PageStandings Nothing) [text "Standings"]
                                     ]
-                                , li_ ((if has _PageRound nav then (class_ "current" :) else id ) []) [
-                                      a_ (hrefPage root $ PageRound 0) [text "Rounds"]
-                                    , ul_ [] $ flip fmap [1..(pData ^. numRounds)] $ \r ->
+                                , li_ ((if has _PageRound nav || has _PagePlayoffs nav then (class_ "current" :) else id ) []) [
+                                      a_ (hrefPage root $ (if havePlayoffs then PagePlayoffs else PageRound 0)) [text "Rounds"]
+                                    , ul_ [] (flip fmap [1..(pData ^. numRounds)] (\r ->
                                         li_ ((if (\r' -> r' == Just r || (r' == Just 0 && r == (pData ^. currentRound))) (nav ^? _PageRound) then (class_ "current" :) else id) []) [
                                               a_ (hrefPage root $ PageRound r) [text $ toMisoString $ "Round " <> show r]
+                                        ]) <> if havePlayoffs then [
+                                            li_ (if has _PagePlayoffs nav then [class_ "current"] else []) [
+                                                a_ (hrefPage root $ PagePlayoffs) [text $ "Top 4"]
                                             ]
+                                        ] else []
+                                        )
                                     ]
                                 , li_ ((if has _PagePlayer nav || has _PagePlayers nav then (class_ "current" :) else id ) []) [
                                       a_ (if interactive then (hrefPage root $ PagePlayers) else []) [text "Players"]
@@ -243,12 +256,47 @@ viewPage root page@(Page pData interactive nav) = div_ [] ([
                                 ]
                             ]
                         ]
+                    icon file cl = img_ [src_ (root <> "static/" <> file), class_ cl]
                     content = (if interactive then (nodeHtml "data" [id_ "page-data", data_ "page-data" (toMisoString $ A.encode pData)] [] :) else id) $ (case nav of
-                        PageStandings r -> [standings r]
+                        PageStandings r -> (if havePlayoffs then [playoffs] else []) <> [standings r]
                         PageRound r -> round r
+                        PagePlayoffs -> [playoffs]
                         PagePlayer p -> [playerPage p]
                         PagePlayers -> [playersPage]
                         )
+                    playoffs = div_ [class_ "top4"] $ pData ^.. playoffData . playoffMatches . to Map.toList . traverse . to playoffMatch
+                    playoffMatch (ident, match) = let 
+                        (className, matchHeading) = resolveMatchID ident
+                        resolveMatchID :: PlayoffMatchID -> (String, String)
+                        resolveMatchID ident = case ident of
+                            Semifinals 0 -> ("semifinals-one", "Semifinal One")
+                            Semifinals 1 -> ("semifinals-two", "Semifinal Two")
+                            Finals -> ("finals", "Final")
+                            MatchForThird -> ("match-for-third", "Match for 3rd")
+                        (matchLength, leftName, leftScore, rightName, rightScore) = case match of
+                            Left (matchLength, [leftParticipant, rightParticipant]) -> (matchLength, playerDisplayName leftParticipant, 0, playerDisplayName rightParticipant, 0)
+                            Right (MatchData [leftParticipant, rightParticipant] matchLength results) -> let
+                                (leftScore, rightScore) = foldr (\[a,b] (x,y) -> if a > b then (x+1, y) else if a < b then (x, y+1) else (x,y)) (0,0) results
+                                in (matchLength, playerDisplayName $ Right leftParticipant, leftScore, playerDisplayName $ Right rightParticipant, rightScore)
+                        playerDisplayName (Right player) = fromMaybe "Failed to resolve participant ID" $ pData ^? participants . ix player . participantName
+                        playerDisplayName (Left (matchId, win)) = (if win then "Winner" else "Loser") <> " of " <> snd (resolveMatchID matchId)
+                        leftParticipant = participant leftName leftScore
+                        rightParticipant = participant rightName rightScore
+                        participant name score = div_ [class_ "player"] [
+                                              span_ [class_ "name"] [text $ toMisoString name]
+                                            , span_ [class_ "result"] $ result matchLength score
+                                            ]
+                        result (((+) 1) . (`div` 2) -> n) m = replicate m winImg <> replicate (n - m) noWinImg
+                        winImg = icon "seriesWin.png" "series-win"
+                        noWinImg = icon "seriesNoWin.png" "series-no-win"
+                        in div_ [class_ (toMisoString className)] [
+                              span_ [class_ "match-heading"] [text $ toMisoString $ matchHeading]
+                            , div_ [class_ "match"] [
+                                  leftParticipant
+                                , divider
+                                , rightParticipant
+                                ]
+                            ]
                     standings Nothing = standings $ Just $ pData ^. currentRound
                     standings (Just r) = table_ [] $ header : content where
                         header = tr_ [] ([
@@ -286,11 +334,11 @@ viewPage root page@(Page pData interactive nav) = div_ [] ([
                         displayResults 1 [1] = span_ [class_ "result tie"] [text "+1"]
                         displayResults 1 [3] = span_ [class_ "result win"] [text "+3"]
                         displayResults _ _ = text "TODO"
-                        divider = div_ [class_ "divider"] [
+                        in div_ [class_ "match match3"] $ intersperse divider playerBoxes
+                    divider = div_ [class_ "divider"] [
                               span_ [] [text "vs"]
                             , span_ [] []
                             ]
-                        in div_ [class_ "match match3"] $ intersperse divider playerBoxes
                     playerName player = a_ (hrefPage root (PagePlayer player)) [text $ toMisoString player]
                     playerPage player = case findIndex (==player) players of
                         Nothing -> div_ [] [text "Not found: That player does not seem to exist"]
